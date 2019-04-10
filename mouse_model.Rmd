@@ -1,0 +1,864 @@
+---
+title: "Mouse_modeling"
+author: "LeZhang"
+date: "6/13/2018"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Setup
+This is a automatic report script. Users only need to place this Rmd to the same folder as you store mouse training data and knit. A html report will be generated.
+
+You need to specify your go/nogo ratio below
+```{r , echo = T}
+goRatio = 0.50
+
+```
+
+<style type="text/css">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r setup, include=FALSE, warning= F, message= F}
+knitr::opts_chunk$set(echo = F,
+                      warning = F,
+                      message = F)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(gridExtra)
+library(broom)
+```
+
+# Data structure
+
+## Mice from different days analyzed
+
+```{r read, warning= F, }
+files = list.files(pattern = "behavior.csv$")
+
+
+mouseID  = as.factor(str_extract(files, "[^_]+"))
+
+mouse_time = as.Date(gsub(".*_([0-9]+-[0-9]+-[0-9]+)_.*$", "\\1", files)) %>%
+    tibble(date = .) %>%
+    mutate(mouseID = mouseID) %>%
+    group_by(mouseID) %>%
+    mutate(day = rank(date))
+
+dfs = lapply(files,
+             function(x)
+             read_csv(x,
+             col_types = cols(
+             X11 = col_skip(),
+             lick_timestamps = col_character()
+             )))
+             
+dfs = lapply(seq_along(dfs),
+             function(x)
+                 mutate(dfs[[x]], mouseID = mouseID[x]))
+
+dfs  = lapply(seq_along(dfs),
+              function(x)
+                  mutate(dfs[[x]], day = mouse_time$day[x]))
+             
+df = as.tibble(plyr::rbind.fill(dfs))
+
+print(mouse_time) 
+```
+
+## Structure of data set
+```{r glimpse}
+dim(df)
+names(df)
+```
+
+## clean
+Check structure again after removing `NA`
+```{r clean1}
+#replace all NA in injection to 0
+df$InjectOrNot = 0
+
+#temp change NA in time to 0
+df$lick_timestamps[is.na(df$lick_timestamps)] = "99"
+
+# remove last a few empty rows
+df = drop_na(df)
+dim(df)
+
+# only leave the first lick time
+df$lick_timestamps = as.numeric(gsub(pattern = "[ ].*", "\\1", df$lick_timestamps))
+
+#add a lick no-lick column
+df = add_column(df, lick_nolick = as.factor(ifelse(df$lick_timestamps != 99, "lick", "nolick")))
+
+# 
+```
+
+
+```{r clean2}
+# add category column
+
+
+df = add_column(df, B.type = as.character(NA))
+
+
+df  %<>%
+    mutate(B.type = if_else(hit_trials == 1,
+    "hit",
+    if_else(
+        miss_trials == 1,
+        "mis",
+        if_else(cr_trials == 1,
+                "cr",
+                if_else(fa_trials == 1,
+                    "fa",
+                    if_else(premature_trials == 1,
+                        "premature",
+                        "error")
+                )
+        )
+    )
+))
+    
+df %>% group_by(B.type, mouseID) %>% tally() 
+
+#delete error rows
+df = filter(df, B.type != "error")
+
+```
+
+# Basic stats of in plots 
+```{r stats}
+#check again with plot
+
+df %>% 
+  group_by(B.type, mouseID, day) %>%
+  tally() %>% 
+  group_by( mouseID, day) %>%
+  mutate(percent = round(n/sum(n)*100, 0)) %T>%
+            {print(
+              ggplot(.)+
+                geom_bar(aes(x = B.type, y = n, fill = B.type), stat = "identity") +
+                geom_text(aes(x = B.type, y = n, label = percent)) + 
+                facet_grid(mouseID ~ day) + 
+                theme(axis.title.x=element_blank(),
+                      axis.text.x=element_blank(),
+                      axis.ticks.x=element_blank()) +
+                ggtitle("type counts and percent of different mice in different days")
+                )
+             print(
+              ggplot(.)+
+                geom_line(aes(x = day, y = percent, color = B.type)) +
+                #geom_text(aes(x = B.type, y = n, label = percent)) + 
+                facet_grid(.~ mouseID) +
+                scale_x_continuous(breaks=1:max(mouse_time$day)) + 
+                ggtitle("type trend in percent of different mice in different days")
+                )
+            } 
+
+
+
+```
+> Add one column: correct.b - correct behavior, correct 1, fail 0
+
+> Add one column: correct.b.ma - correct behavior and premature, correct 1, fail -1, premature 0
+
+
+
+```{r}
+# add one column: correct.b
+# correct behavior
+df %<>% 
+  mutate(correct.b = if_else(condition = hit_trials == 1,
+                             true      = 1,
+                             false     = if_else(cr_trials == 1, 1, 0)
+                             )
+         ) 
+## premature count as failure here, but need to be removed when build model
+
+# add one column: correct.b.ma 
+
+df %<>% 
+  mutate(correct.b.ma = if_else(condition = hit_trials == 1,
+                             true      = 1,
+                             false     = if_else(cr_trials == 1, 1,
+                                                 if_else(premature_trials == 1,
+                                                         0, -1))
+                             )
+         )
+```
+
+
+# Go : NoGo Ratio & Correct Ratio
+```{r ,message = F}
+df %>% filter(premature_trials != 1) %>%
+  ggplot() +
+    geom_bar(aes(x = factor(go_trials),
+                 y = (..count..)/tapply(..count..,..PANEL..,sum)[..PANEL..],
+                 fill = factor(go_trials)
+                 ),
+             position = "stack"
+             ) +
+    facet_grid(mouseID ~ day) + 
+    xlab("Nogo vs. GO") +
+    ylab("percent") + 
+    ggtitle("Go and NoGO of different mice in different days")
+
+df %>% 
+  filter(premature_trials != 1) %>%
+  group_by(day, mouseID) %>%
+  summarise(ratio = round(sum(go_trials)/length(go_trials), 2),
+            correct.b.rate = round(sum(correct.b)/length(correct.b), 2)
+            ) %>%
+  add_column(sample = seq(nrow(.))) %T>%
+    {
+      p1 = ggplot(.) +
+        geom_text(aes(x = sample, y = ratio, label = ratio, color = mouseID), size = 3) +
+        geom_smooth(aes(x = sample, y = ratio, color = mouseID), alpha = 0.05) +
+        ylim(0.4, 0.6) +
+        ggtitle("Go : NoGO trend")
+           
+      
+      p2 = ggplot(.) +
+        geom_boxplot(aes(x = mouseID, y = ratio, color = mouseID)) +
+        geom_point(aes(x = mouseID, y = ratio, color = mouseID))+
+        ylim(0.4, 0.6) +
+        ggtitle("Go : NoGO boxplot")
+      
+      p3 = ggplot(.) +
+        geom_point(aes(x = day, y = correct.b.rate, color = mouseID))+
+        geom_smooth(aes(x = day, y = correct.b.rate, color = mouseID), alpha = 0.01)+
+        ylim(0.5, 0.9) +
+        ggtitle("Correct rate by mouse and day")
+      
+    grid.arrange(p1, p2, p3, nrow = 3)
+    } %>%
+  ungroup() %>%
+  group_by(mouseID) %>%
+  do(tidy(t.test(.$ratio, data=.)))
+
+  
+```
+
+
+## 95% interval of Go: NoGo = `r goRatio`
+
+based on 10 times max days( `r max(mouse_time$day)` days) random sampling with 350 trials per day, the 95 confidence intervel is as below:
+```{r , message=F}
+
+
+replicate(max(mouse_time$day) * 10,
+          mean(rbinom(350, 1, goRatio))) %>%
+          t.test() %>%
+          tidy()
+```
+
+
+# Modeling
+All models tested with 25 fold bootstrap validations.
+
+
+
+```{r}
+library(caret)
+
+controls <- trainControl(method = "cv", number = 5)
+```
+
+## Fit data to a logistic model
+While buiding the model, prematures are removed, the previous go/nogo number is treated as previous trial. 
+```{r simple logistic}
+logistic_simple = df %>%
+  filter(premature_trials != 1) %>%
+  select(mouseID, day, TrialNum, correct.b, correct.b.ma)
+
+logistic_simple[,paste0("previous.", 1:10, "t")] = NA
+
+  
+logistic_simple_list = logistic_simple %>%
+  group_by(mouseID, day) %>%
+  plyr::dlply(., .variables = c("mouseID", "day"), identity)
+
+##
+i = NULL
+j = NULL
+nList = NULL
+for (nList in seq_along(logistic_simple_list)){
+  for (j in seq_len(nrow(logistic_simple_list[[nList]]))){
+    for (i in seq_len(10)) {
+      if (j - i > 0.5){
+        logistic_simple_list[[nList]][j, 5+i] = logistic_simple_list[[nList]][j-i, 4]
+      }
+    }
+  }
+}
+#check
+#logistic_simple_list[[1]] 
+
+#
+logistic_summary = matrix(rep(NA,10*length(logistic_simple_list)),
+                             ncol = length(logistic_simple_list)) %>%
+                   as.tibble()
+
+names(logistic_summary) = names(logistic_simple_list)
+
+
+for (nList in seq_along(logistic_simple_list)){
+  logistic_simple_list[[nList]] %>%
+  as.tibble() %>%
+  mutate_all(., .funs = factor) %>%
+  drop_na() %>%
+  select(- mouseID, - day, - TrialNum, - correct.b.ma) ->
+  logistic_simple_df
+  
+
+  sapply(2:11,function(i){
+      logistic_simple_df_sub = select(logistic_simple_df,1:i)
+      train(correct.b ~ .,
+            data=logistic_simple_df_sub,
+            method="glm",
+            family = binomial,
+            na.action = na.pass
+           ) %>% 
+     .[["results"]] %>%
+     .[2] 
+  }) %>%
+  unlist() ->
+  logistic_summary[,nList]
+  
+}
+
+#
+logistic_summary %<>%
+  mutate(trace_back_num = paste0("back.", str_pad(1:10, 2, pad = "0")))
+
+#
+logistic_summary  %>%
+  t() %>%
+  as.tibble() ->
+  logistic_summary_t
+  
+names(logistic_summary_t) = logistic_summary_t[nrow(logistic_summary_t),]
+logistic_summary_t = logistic_summary_t[-nrow(logistic_summary_t),]
+
+logistic_summary_t_plot = 
+  gather(logistic_summary_t) %>%
+  mutate(key = as.factor(key), value = as.numeric(value)) %>%
+  mutate(type = "original")
+
+
+#
+logistic_summary_plot = 
+logistic_summary %>%
+  select(-trace_back_num) %>%
+  gather() %>%
+  {str_split(.$key, "\\.", simplify = T)} %>%
+  cbind(.,
+        logistic_summary %>%
+          select(-trace_back_num) %>%
+          gather())
+  
+names(logistic_summary_plot) = c("mouseID", "day", "key", "value")
+
+logistic_summary_plot %<>% select( -key)
+
+logistic_summary_plot %<>%
+  mutate(trial = rep(1:10, nrow(logistic_summary_plot) / 10)) %>%
+  mutate(mouseID = as.factor(mouseID),
+         day     = as.factor(day),
+         trial   = as.factor(trial),
+         value   = as.numeric(value),
+         type    = "original")
+```
+
+# Let's do the shuffle before ploting
+
+Shuffle 5 times and take the mean
+
+Code maybe hiding in final report
+```{r}
+#shuffle
+shuf_logistic = df %>%
+  filter(premature_trials != 1) %>%
+  select(mouseID, day, TrialNum, correct.b, correct.b.ma)
+
+shuf_logistic[,paste0("previous.", 1:10, "t")] = NA
+
+Shuffle = function(shuf_logistic){
+shuf_logistic %<>%
+  group_by(mouseID, day) %>%
+  mutate(correct.b = sample(correct.b))
+
+  
+shuf_logistic_list = shuf_logistic %>%
+  group_by(mouseID, day) %>%
+  plyr::dlply(., .variables = c("mouseID", "day"), identity)
+
+##
+i = NULL
+j = NULL
+nList = NULL
+for (nList in seq_along(shuf_logistic_list)){
+  for (j in seq_len(nrow(shuf_logistic_list[[nList]]))){
+    for (i in seq_len(10)) {
+      if (j - i > 0.5){
+        shuf_logistic_list[[nList]][j, 5+i] = shuf_logistic_list[[nList]][j -i, 4]
+      }
+    }
+  }
+}
+
+#
+logistic_shuf_summary = matrix(rep(NA,10*length(shuf_logistic_list)),
+                             ncol = length(shuf_logistic_list)) %>%
+                   as.tibble()
+
+names(logistic_shuf_summary) = names(shuf_logistic_list)
+
+
+for (nList in seq_along(shuf_logistic_list)){
+  shuf_logistic_list[[nList]] %>%
+  as.tibble() %>%
+  mutate_all(., .funs = factor) %>%
+  drop_na() %>%
+  select(- mouseID, - day, - TrialNum, - correct.b.ma) ->
+  logistic_simple_df
+  
+
+  sapply(2:11,function(i){
+      logistic_simple_df_sub = select(logistic_simple_df,1:i)
+      train(correct.b ~ .,
+            data=logistic_simple_df_sub,
+            method="glm",
+            family = binomial,
+            na.action = na.pass
+           ) %>% 
+     .[["results"]] %>%
+     .[2] 
+  }) %>%
+  unlist() ->
+  logistic_shuf_summary[,nList]
+  }
+return(logistic_shuf_summary)
+}
+
+logistic_shuf_summary = replicate(5, list(Shuffle(shuf_logistic)))
+    
+
+
+logistic_shuf_summary = as.tibble(Reduce("+", logistic_shuf_summary)/length(logistic_shuf_summary))
+
+logistic_shuf_summary %<>%
+  mutate(trace_back_num = paste0("back.", str_pad(1:10, 2, pad = "0")))
+
+logistic_shuf_summary  %>%
+  t() %>%
+  as.tibble() ->
+  logistic_shuf_summary_t
+  
+names(logistic_shuf_summary_t) = logistic_shuf_summary_t[nrow(logistic_shuf_summary_t),]
+logistic_shuf_summary_t = logistic_shuf_summary_t[-nrow(logistic_shuf_summary_t),]
+
+logistic_shuf_summary_t_plot = 
+  gather(logistic_shuf_summary_t) %>%
+  mutate(key = as.factor(key), value = as.numeric(value)) %>%
+  mutate(type = "shuffle")
+
+#
+logistic_shuf_plot = 
+logistic_shuf_summary %>%
+  select(-trace_back_num) %>%
+  gather() %>%
+  {str_split(.$key, "\\.", simplify = T)} %>%
+  cbind(.,
+        logistic_shuf_summary %>%
+          select(-trace_back_num) %>%
+          gather())
+  
+names(logistic_shuf_plot) = c("mouseID", "day", "key", "value")
+
+logistic_shuf_plot %<>% select( -key)
+
+logistic_shuf_plot %<>%
+  mutate(trial = rep(1:10, nrow(logistic_shuf_plot) / 10)) %>%
+  mutate(mouseID = as.factor(mouseID),
+         day     = as.factor(day),
+         trial   = as.factor(trial),
+         value   = as.numeric(value),
+         type    = "shuffle")
+```
+
+
+```{r , eval = F}
+#get random and predictable sequence
+Pred = function(percent){
+df_pred = tibble(correct.b = rep(c(0, 1), 2000))
+
+df_pred[,paste0("previous.", 1:10, "t")] = NA
+
+df_pred %<>%
+add_column(TrialNum = seq_len(nrow(df_pred)), .before = "correct.b")
+
+# muate some sequence
+
+df_pred$correct.b[(sample(4000) <= 40*percent)] = sample(df_pred$correct.b[(sample(4000) <= 400)])
+
+i = NULL
+j = NULL
+
+  for (j in seq_len(nrow(df_pred))){
+    for (i in seq_len(10)) {
+      if (j - i > 0.5){
+        df_pred[df_pred$TrialNum == j, 2+i] = df_pred[df_pred$TrialNum == j -i, 2]
+      }
+    }
+  }
+
+
+
+pred_summary = matrix(rep(NA,(length(df_pred) - 2)),
+                             ncol = length(df_pred)-2) %>%
+                   as.tibble()
+
+names(pred_summary) = names(df_pred)[c(-1, -2)]
+
+
+sapply(3:12,function(i){
+    df_pred_sub = select(df_pred,2:12) %>%
+      mutate_all(., .funs = factor) %>%
+      drop_na()
+    train(correct.b ~ .,
+          data=df_pred_sub,
+          method="glm",
+          family = binomial,
+          na.action = na.pass
+         ) %>% 
+   .[["results"]] %>%
+   .[2]
+  }
+) %>%
+  unlist() %>%
+  return()
+}
+
+PredictionRate = map(seq(from = 10, to = 90, by = 10)
+           ,Pred) %>%
+  unlist %>%
+  tibble
+PredictionRate %<>%
+  rename(rate    = '.') %>%
+  mutate(percent = rep(seq(from = 10,
+                           to   = 90,
+                           by   = 10),
+                       each = 10),
+         history = rep(seq(1:10),
+                       9)
+         )
+write.csv(PredictionRate, "PredictionRate.csv", row.names = F)
+```
+
+
+```{r}
+PredictionRate = read_csv("PredictionRate.csv")
+
+ggplot(PredictionRate)+
+  geom_smooth(aes(x = history, y = rate, color = percent, group = percent)) +
+  ggtitle("Relation between prediction rate vs. previous history and random percentage")
+```
+
+
+```{r}
+#combine real and shuffle data set
+logistic_plot = as.tibble(bind_rows(logistic_summary_plot, logistic_shuf_plot))
+
+# train a random sequence
+set.seed(1)
+sequence  = rbinom(35000, 1, 0.5)
+set.seed(2)
+results = rbinom(35000, 1, 0.5)
+
+```
+
+
+```{r}
+ggplot(logistic_summary_t_plot) +
+  geom_boxplot(aes(x = key, y = value, group = key)) +
+  geom_point(aes(x = key, y = value, group = key), color = "#4286f4")+
+  geom_smooth(aes(x = key, y = value, group=1), alpha = 0.2)+
+  geom_hline(aes(yintercept = mean(value), linetype = "mean"), color ="blue")+
+  geom_hline(aes(yintercept = mean(logistic_shuf_summary_t_plot$value), linetype = "shuffle mean"), color = "red")+
+  geom_hline(aes(yintercept = 0.5, linetype = "random"), color = "black")+
+  scale_linetype_manual(name  = "line type", values = c(2, 2, 2), 
+                        guide = guide_legend(override.aes = list(color = c("blue", "black", "red"))))
+
+
+
+
+
+ggplot(logistic_plot)+
+  geom_point(aes( x = trial, y = value, group = type, color = type))+
+  geom_smooth(aes(x = trial, y = value, group = type, color = type), alpha = 0.2) +
+  facet_grid(mouseID~day) 
+  
+
+```
+
+## Fit data to a KNN model 
+
+```{r knn}
+df_knn = df %>%
+  select(mouseID, day, TrialNum, correct.b.ma)
+
+df_knn_shuf = df_knn
+set.seed(1)
+df_knn_shuf$correct.b.ma = sample(df_knn_shuf$correct.b.ma)
+
+Pred_knn = function(df_knn){
+  
+  df_knn[,paste0("previous.", 1:10, "t")] = NA
+
+  
+knn_list = df_knn %>%
+  group_by(mouseID, day) %>%
+  plyr::dlply(., .variables = c("mouseID", "day"), identity)
+##
+i = NULL
+j = NULL
+nList = NULL
+for (nList in seq_along(knn_list)){
+  for (j in seq_len(nrow(knn_list[[nList]]))){
+    for (i in seq_len(10)) {
+      if (j - i > 0.5){
+        knn_list[[nList]][knn_list[[nList]]$TrialNum == j, 4+i] = knn_list[[nList]][knn_list[[nList]]$TrialNum == j -i, 4]
+      }
+    }
+  }
+}
+
+knn_summary = matrix(rep(NA,10*length(knn_list)),
+                             ncol = length(knn_list)) %>%
+                   as.tibble()
+
+names(knn_summary) = names(knn_list)
+
+for (nList in seq_along(knn_list)){
+  knn_list[[nList]] %>%
+  as.tibble() %>%
+  mutate_all(., .funs = factor) %>%
+  drop_na() %>%
+  select(- mouseID, - day, - TrialNum) ->
+  knn_simple_df
+  
+  sapply(2:11,function(i){
+      knn_simple_df_sub = select(knn_simple_df,1:i)
+      train(correct.b.ma ~ .,
+            data=knn_simple_df_sub,
+            method="knn",
+            na.action = na.pass
+            ) %>% {
+              best = as.numeric(.[[6]])
+              .[[4]] %>%
+                filter(k == best) %>%
+                .[1,2]
+           }
+  }) %>%
+  unlist() ->
+  knn_summary[,nList]
+}
+
+
+knn_summary %<>%
+  mutate(trace_back_num = paste0("back.", str_pad(1:10, 2, pad = "0")))
+
+
+knn_summary  %>%
+  t() %>%
+  as.tibble() ->
+  knn_summary_t
+  
+names(knn_summary_t) = knn_summary_t[nrow(knn_summary_t),]
+knn_summary_t = knn_summary_t[-nrow(knn_summary_t),]
+
+knn_summary_t_plot = 
+  gather(knn_summary_t) %>%
+  mutate(key = as.factor(key), value = as.numeric(value))
+
+p1 = ggplot(knn_summary_t_plot) +
+  geom_boxplot(aes(x = key, y = value, group = key)) +
+  geom_point(aes(x = key, y = value, group = key), color = "#4286f4")+
+  geom_smooth(aes(x = key, y = value, group=1), alpha = 0.2)+
+  geom_hline(aes(yintercept = mean(value)))
+
+knn_summary_plot = 
+knn_summary %>%
+  select(-trace_back_num) %>%
+  gather() %>%
+  {str_split(.$key, "\\.", simplify = T)} %>%
+  cbind(.,
+        knn_summary %>%
+          select(-trace_back_num) %>%
+          gather())
+  
+names(knn_summary_plot) = c("mouseID", "day", "key", "value")
+
+knn_summary_plot %<>% select( -key)
+
+knn_summary_plot %<>%
+  mutate(trial = rep(1:10, nrow(knn_summary_plot) / 10)) %>%
+  mutate(mouseID = as.factor(mouseID),
+         day = as.factor(day),
+         trial = as.factor(trial),
+         value = as.numeric(value))
+
+
+p2 = ggplot(knn_summary_plot)+
+  geom_point(aes(x = trial, y = value), color = "#4286f4")+
+  geom_smooth(aes(x = trial, y = value, group = 1), alpha = 0.2) +
+  facet_grid(mouseID~day)
+
+print(p1)
+print(p2)
+}
+
+Pred_knn(df_knn_shuf)
+```
+Fit Knn model with correct, not correct and pre-mature
+```{r}
+Pred_knn(df_knn)
+```
+
+```{r complex logistic, eval= F}
+
+track1_model = df %>% 
+  select(-B.type, -correct.b.ma) %>% 
+  filter(TrialNum %in% c(1:3)) %>% 
+  mutate(correct.b = replace(correct.b, TrialNum %in% c(1, 2), NA)) %>%
+  group_by(mouseID,day) %>%
+  fill(correct.b, .direction = "up") %>%
+  do(modelfit = train(factor(correct.b) ~ . - mouseID - day - TrialNum,
+                      data=., method="glm",
+                      family = binomial,
+                      trControl=trainControl(method="none")
+                          )
+     )
+tidy(track1_model, modelfit)
+track1_model$modelfit[1:10]
+```
+
+## correlation
+corplot of each variable used agianst 'if correct behavior' as the y variable.
+
+In the following plot, `correct.b.ma` is the response variable.
+
+```{r }
+ColorCorplot = colorRampPalette(c("#67001F", "#B2182B", "#D6604D",
+                                  "#92C5DE",
+                                  "#4393C3", "#2166AC", "#053061"))
+
+
+df %>% 
+  select(go_trials,
+         lick_timestamps,
+         day,
+         correct.b.ma) %>%
+  cor() %>%
+  corrplot::corrplot(.,
+                     method="number",   
+                     type="upper",
+                     col = ColorCorplot(100)
+                     )
+
+```
+
+## Autocorrelation
+
+```{r}
+library(tseries)
+df %>%
+  filter(premature_trials != 1) %>%
+  group_by(mouseID,day) %>%
+  count() %>%
+  nrow() ->
+  nsamples
+
+par(mfrow=c(5,ceiling(nsamples/5)))
+
+df %>%
+  filter(premature_trials != 1) %>%
+  group_by(mouseID,day) %>%
+  select(correct.b) %>%
+  do(., pacf(.$correct.b, lag.max = 10, plot = T))
+dev.off()
+
+df %>%
+  filter(premature_trials != 1) %>%
+  is.na(.)
+pacf(df$correct.b, plot = F, lag.max = 30) %>% plot
+```
+
+
+
+# Ignore below
+
+## Fit a linear model of `correct.b.ma`
+```{r , eval= F}
+
+
+lm_model = df %>% 
+              select(go_trials,
+                     lick_timestamps,
+                     day,
+                     correct.b.ma) %>%
+              train(correct.b.ma ~ ., data=., method="glm", trControl = controls)
+
+lm_model
+summary(lm_model)
+
+```
+
+## A logistic model classification with `correct.b`
+The max outcome from glm is 2: 0 & 1; so can't use `correct.b.ma`. Prematures are removed
+
+```{r , eval= F}
+logit_model = df %>% 
+                select(go_trials,
+                       lick_timestamps,
+                       day,
+                       premature_trials,
+                       correct.b) %>%
+                filter(premature_trials == 0) %>%
+                select(-premature_trials) %>%
+                train(factor(correct.b) ~ .,
+                      data=., method="glm",
+                      family = binomial(),
+                      trControl = controls)
+logit_model
+summary(logit_model)      
+```
+
+## KNN model with `B.type`
+Use KNN to fit b.type which can handle more than 2 types.
+
+```{r , eval= F}
+knn_model = df %>% 
+              select(go_trials,
+                     lick_timestamps,
+                     day,
+                     B.type) %>%
+              train(factor(B.type) ~ ., data=., method="knn", trControl = controls)
+
+knn_model
+
+ggplot(df)+
+  geom_point(aes(x = B.type, y = lick_timestamps))
+```
+
