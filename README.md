@@ -6,4 +6,4 @@ All current project repositories are private, so some coding examples are provid
 - [multiprocess_wrapper](https://github.com/lz100/showcase/blob/master/multiprocess_wrapper.py)
 and [universal_functions](https://github.com/lz100/showcase/blob/master/universal_functions.py) are some python general utilities like parallel computing, logging, *etc*. that can be used in all projects. 
 
-- [Variant_summary]() is a simple variant statistic analysis.
+- [Variant_summary](https://github.com/lz100/showcase/blob/master/One_sample_WGS_report.pdf) is a simple variant statistic analysis.
