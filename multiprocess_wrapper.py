@@ -6,10 +6,12 @@ Created on Wed Feb 13 19:37:13 2019
 @author: lz
 """
 import time
-import multiprocessing as mp
+import multiprocessing
+import click
+import universal_functions as uf
 
 
-class NewMp:
+class mp:
     """
     Multiprocess object, can know which processes are running and which are waiting.
     func = function to multiprocess
@@ -17,18 +19,37 @@ class NewMp:
     fixed_arg = other args in function that is fixed in all process
     pool_size = how many processes to open
     timeout = how long to wait for a job until you call it failed
+    job_names = jobs names in a list of strings with the same length as mp_arg
     flushtime = seconds you want the program to report status and fill in new jobs, should << than your job running time
     kwarg = other fixed key word args to function each iteration
     After creating object, call run() method to start the jobs
     """
 
-    def __init__(self, func, mp_arg, *fixed_arg, pool_size=4, timeout=None, flushtime=5, **kwarg):
+    def __init__(self, func, mp_arg, *fixed_arg, pool_size=None, timeout=None, job_names=[], flushtime=5, **kwarg):
         self.func = func
-        self.pool_size = pool_size
         if isinstance(mp_arg, list):
             self.mp_arg = mp_arg
         else:
-            raise ValueError('must be a list')
+            raise ValueError('mp_arg must be a list')
+
+        if isinstance(pool_size, int):
+            self.mp_arg = mp_arg
+        else:
+            raise ValueError('must be an integer')
+
+        if isinstance(job_names, list):
+            if job_names and len(job_names) == len(mp_arg):
+                self.job_names = job_names
+            else:
+                self.job_names = []
+        else:
+            raise ValueError('job_names must be a list')
+
+        if not pool_size:
+            self.pool_size = multiprocessing.cpu_count()
+        else:
+            self.pool_size = pool_size
+
         self.timeout = timeout
         self.fixed_arg = fixed_arg
         self.kwarg = kwarg
@@ -53,71 +74,115 @@ class NewMp:
         return list(self._failed)
 
     def status(self):
-        """Returns a list, fisrt value how many completed, second how many failed"""
+        """Returns a list, first value how many completed, second how many failed"""
         return [len(self._completed), len(self._failed)]
 
     def run(self):
         _job_indices = {x for x in range(len(self.mp_arg))}
         _running = set()
-        p = mp.Pool(self.pool_size)
-
-        print(len(_job_indices), ' number of jobs, jobs waiting to run', _job_indices)
-        print('pool size is', self.pool_size)
+        p = multiprocessing.Pool(self.pool_size)
+        uf.info(f' number of jobs {len(_job_indices)}, jobs waiting to run {_job_indices}', True)
+        uf.info(f'pool size is {self.pool_size}', True)
         _jobs = []
         time.sleep(3)
         _slots_remain = self.pool_size
         _submitted = set()
+        _timer = time.perf_counter()
 
-        while _job_indices != set():
-            _slot_count = 0
-            try:
-                _slots_remain = self.pool_size - [job.ready() for job in _jobs].count(False)
-            except:
-                pass
-            try:
-                for i in _job_indices:
-                    if _slot_count < _slots_remain:
-                        _args = tuple([self.mp_arg[i]] + list(self.fixed_arg))
-                        _jobs += [p.apply_async(self.func, args=_args, kwds=self.kwarg)]
-                        _submitted.add(i)
-                        _slot_count += 1
-            except:
-                pass
-            for index, job in enumerate(_jobs):
-                if job.ready():
-                    self._completed.add(index)
+        with click.progressbar(length=len(self.mp_arg)) as bar:
+            while _job_indices != set():
+                _slot_count = 0
+                try:
+                    _slots_remain = self.pool_size - [job.ready() for job in _jobs].count(False)
+                except:
+                    pass
+                try:
+                    for i in _job_indices:
+                        if _slot_count < _slots_remain:
+                            _args = tuple([self.mp_arg[i]] + list(self.fixed_arg))
+                            _jobs += [p.apply_async(self.func, args=_args, kwds=self.kwarg)]
+                            _submitted.add(i)
+                            _slot_count += 1
+                except:
+                    pass
+                for index, job in enumerate(_jobs):
+                    if job.ready():
+                        self._completed.add(index)
+                    else:
+                        _running.add(index)
+                _job_indices -= _submitted
+
+                if self.job_names:
+                    uf.info('jobs running: {}'.format(
+                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_running)])), True)
+                    uf.info('jobs completed: {}'.format(
+                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(self._completed)])), True)
+                    uf.info('jobs waiting: {}'.format(
+                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_job_indices)])),True)
+                    uf.info(f'number waiting: {len(_job_indices)}', True)
                 else:
-                    _running.add(index)
-            _job_indices -= _submitted
-            print('jobs running', list(_running))
-            print('jobs completed', list(self._completed))
-            print('jobs waiting ', list(_job_indices))
-            print('number waiting ', len(_job_indices))
-            _running = set()
-            time.sleep(self.flushtime)
-        for i, job in enumerate(_jobs):
-            try:
-                job.wait(timeout=self.timeout)
-                self.res.append(job.get(timeout=1))
-            except:
-                print('Job ', i, 'waited too long, time out')
-                self._failed.add(i)
-        if all([job.ready() and job.successful() for job in _jobs]):
-            print('All jobs are successfully done')
-        elif all([job.ready() for job in _jobs]):
-            print('All jobs have been run but some failed')
+                    uf.info(f'jobs running: {list(_running)}', True)
+                    uf.info(f'jobs completed: {list(self._completed)}', True)
+                    uf.info(f'jobs waiting: {list(_job_indices)}', True)
+                    uf.info(f'number waiting: {len(_job_indices)}', True)
+                    _running = set()
+                bar.update(len(self._completed))
+                print("")
+                time.sleep(self.flushtime)
+
+                    # behavior after all jobs submitted
+            while len(self._completed) != len(self.mp_arg):
+                for index, job in enumerate(_jobs):
+                    if job.ready():
+                        self._completed.add(index)
+                    else:
+                        _running.add(index)
+                if self.job_names:
+                    uf.info('jobs running: {}'.format(
+                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_running)])), True)
+                    uf.info('jobs completed: {}'.format(
+                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(self._completed)])), True)
+                else:
+                    uf.info(f'jobs running: {list(_running)}', True)
+                    uf.info(f'jobs completed: {list(self._completed)}', True)
+
+                _running = set()
+                bar.update(len(self._completed))
+                print("")
+                time.sleep(self.flushtime)
+                if self.timeout and time.perf_counter() - _timer > self.timeout:
+                    break
+
+
+            # Try to get results
+            for i, job in enumerate(_jobs):
+                # uf.info("im here 1")
+                try:
+                    # uf.info("i here 2")
+                    self.res.append(job.get(timeout=1))
+                except:
+                    uf.info(f'Job {i} waited too long, time out', True)
+                    self.res.append("Fail")
+                    self._failed.add(i)
+            if all([job.ready() and job.successful() for job in _jobs]):
+                uf.info('All jobs are done running', True)
+            elif all([job.ready() for job in _jobs]):
+                uf.info('All jobs have been run but some failed', True)
 
 ########### test code
 # mylist = [chr(x) for x in range(ord('a'), ord('k'))]
-# def dummy(x):
-#    try:
-#        print('processing '+ str(x))
-#    finally:
-#        time.sleep(10)
 #
-# aaa = new_mp(dummy, mylist)
+#
+# def dummy(x):
+#     try:
+#         uf.info('processing ' + str(x))
+#     finally:
+#         time.sleep(10)
+#
+#
+# aaa = mp(dummy, mylist)
 # aaa.run()
 #
-# bbb = new_mp(max, mylist, 'b', 'c')
+# bbb = mp(max, mylist, 'b', 'c')
 # bbb.run()
 # bbb.res
