@@ -81,20 +81,26 @@ def stamp(level='INFO', note_after_time_stamp=None):
         return stamp_format + ' ' + str(note_after_time_stamp)
 
 
-def shutdown(message, level="Error"):
-    sys.stdout.flush()
-    sys.stderr.flush()
-    click.secho(stamp(level), fg='red', bold=True)
-    click.secho(message=message, fg='red', bold=True)
-    sys.exit(1)
+def info(message, verbose=False):
+    verbose and click.echo(click.style(stamp("INFO"), fg='blue', bold=True) + message)
+
+
+def warning(message):
+    click.echo(click.style(stamp("WARNING"), fg='red', bold=True) + message)
 
 
 def exit0(message, level="INFO"):
     sys.stdout.flush()
     sys.stderr.flush()
-    click.secho(stamp(level), fg='blue', bold=True)
-    click.secho(message=message, fg='blue', bold=True)
+    click.secho(stamp(level) + message, fg='blue', bold=True)
     sys.exit(0)
+
+
+def shutdown(message, level="ERROR"):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    click.secho(message=stamp(level) + message, fg='red', bold=True)
+    sys.exit(1)
 
 
 # A decorator class record time and duration
@@ -161,7 +167,7 @@ class wflog:
             print(Fore.WHITE + 'This process used: ' + time_running + Fore.RESET)
             return (job)
 
-        return (log_wrapper)
+        return log_wrapper
 
 
 class Md5:
@@ -216,7 +222,7 @@ class Md5:
         cpus = cpus if cpus and isinstance(cpus, int) else mp.cpu_count() - 1
 
         if md5s is None:
-            file_names = list(set(file_names))
+            file_names = list(file_names)
 
         # wrapper function for the multiprocess to run
         def md5_mp(_file_names, _cpus, _verbose):
@@ -226,13 +232,12 @@ class Md5:
                 _jobs = [p.apply_async(Md5.file, (file_name,)) for file_name in _file_names]
                 _num_job_running = len(_jobs)
                 _res = [None for x in range(_num_job_running)]
-                if _verbose: print(
-                    stamp('INFO', 'Checking md5 for {} files in {} threads'.format(_num_job_running, _cpus)))
+                info(f'Checking md5 for {_num_job_running} files in {_cpus} threads', _verbose)
                 while not all([job.ready() for job in _jobs]):
                     for index, job in enumerate(_jobs):
                         if job.ready():
                             _completed.add(index)
-                    if _verbose: print(stamp('INFO', 'Finished job: {}'.format(_completed)))
+                    info(f'Finished job: {_completed}', _verbose)
                     time.sleep(5)
                 else:
                     for index, job in enumerate(_jobs):
@@ -241,11 +246,12 @@ class Md5:
                             _failed_names = [_file_names[file] for file in _failed]
 
             if len(_failed) == 0:
-                if _verbose: print('No job failed')
+                if verbose:
+                    info('No md5 checking job failed', True)
                 _all_done = True
             else:
 
-                print(stamp('WARN', f'Md5 failed: {_failed_names}'))
+                warning(f'Md5 failed: {_failed_names}')
                 _all_done = False
             for index, job in enumerate(_jobs):
                 if job.ready() and job.successful():
@@ -256,16 +262,25 @@ class Md5:
         if md5s is not None:
 
             if len(file_names) == len(md5s):
-                for a in md5s:
-                    print(type(a))
-                print(md5s)
                 if len(set(md5s)) > len(set(file_names)):
-                    print(stamp('WARN', 'Duplications detected but some identical paths are given different md5s'))
+                    warning('Duplicated paths detected but they are given different md5 values')
                 res = md5_mp(file_names, cpus, verbose)
-                if verbose: print(stamp('INFO', 'md5s done computing, now compare'))
+                info('md5s done computing, now compare', verbose)
                 compare = [j == md5s[i] for i, j in enumerate(res[0])]
-                return compare, res[1]  # sorted order but still in the right pairs
+                return compare, res[1]
             else:
                 raise ValueError('numbers of file and numbers of md5 do not match')
         else:
             return md5_mp(file_names, cpus, verbose)
+
+
+def round_float(x, digit=2):
+    last_digit = int(x * 10 ** (digit+1) % 10)
+    if last_digit == 5:
+        if digit == 0:
+            x = int(x) + 1
+        else:
+            x = float(str(round(x, digit))[:-1] + str(int(x * 10 ** digit % 10) + 1))
+    else:
+        x = round(x, digit)
+    return x
