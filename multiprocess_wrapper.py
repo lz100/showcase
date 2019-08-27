@@ -57,6 +57,7 @@ class mp:
         self._completed = set()
         self._failed = set()
         self.flushtime = flushtime
+        self.jobs = None
 
     def __str__(self):
         return (f'A self built multiprocess object. '
@@ -81,8 +82,8 @@ class mp:
         _job_indices = {x for x in range(len(self.mp_arg))}
         _running = set()
         p = multiprocessing.Pool(self.pool_size)
-        uf.info(f' number of jobs {len(_job_indices)}, jobs waiting to run {_job_indices}', True)
-        uf.info(f'pool size is {self.pool_size}', True)
+        uf.info(f' Number of jobs {len(_job_indices)}', True)
+        uf.info(f'Pool size is {self.pool_size}', True)
         _jobs = []
         time.sleep(3)
         _slots_remain = self.pool_size
@@ -111,48 +112,51 @@ class mp:
                     else:
                         _running.add(index)
                 _job_indices -= _submitted
-
-                if self.job_names:
-                    uf.info('jobs running: {}'.format(
-                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_running)])), True)
-                    uf.info('jobs completed: {}'.format(
-                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(self._completed)])), True)
-                    uf.info('jobs waiting: {}'.format(
-                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_job_indices)])),True)
-                    uf.info(f'number waiting: {len(_job_indices)}', True)
+                try:
+                    time_last_flush
+                except:
+                    time_last_flush = self.flushtime
+                if time.time() - time_last_flush < self.flushtime + 0.1:
+                    pass
                 else:
-                    uf.info(f'jobs running: {list(_running)}', True)
-                    uf.info(f'jobs completed: {list(self._completed)}', True)
-                    uf.info(f'jobs waiting: {list(_job_indices)}', True)
+                    print_run = [f'{index}{self.job_names[index] if self.job_names else ""}' for index in list(_running)]
+                    print_completed = [f'{index}{self.job_names[index] if self.job_names else ""}' for index in list(self._completed)]
+                    print_waiting = [f'{index}{self.job_names[index] if self.job_names else ""}' for index in list(_job_indices)]
+                    uf.info(f'jobs running: {print_run if len(print_run) <= 15 else len(print_run)}', True)
+                    uf.info(f'jobs completed: {print_completed if len(print_completed) <= 15 else len(print_completed)}', True)
+                    uf.info(f'jobs waiting: {print_waiting if len(print_waiting) <= 15 else len(print_waiting)}', True)
                     uf.info(f'number waiting: {len(_job_indices)}', True)
-                    _running = set()
-                bar.update(len(self._completed))
-                print("")
-                time.sleep(self.flushtime)
+                    bar.update(len(self._completed))
+                    print("")
+                    time_last_flush = time.time()
+                _running = set()
 
-                    # behavior after all jobs submitted
+            # behavior after all jobs submitted
             while len(self._completed) != len(self.mp_arg):
                 for index, job in enumerate(_jobs):
                     if job.ready():
                         self._completed.add(index)
                     else:
                         _running.add(index)
-                if self.job_names:
-                    uf.info('jobs running: {}'.format(
-                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(_running)])), True)
-                    uf.info('jobs completed: {}'.format(
-                        "".join([str(index) + " " + self.job_names[index] + "\n" for index in list(self._completed)])), True)
-                else:
-                    uf.info(f'jobs running: {list(_running)}', True)
-                    uf.info(f'jobs completed: {list(self._completed)}', True)
 
+                try:
+                    time_last_flush
+                except:
+                    time_last_flush = self.flushtime
+                if time.time() - time_last_flush < self.flushtime + 0.1:
+                    pass
+                else:
+                    print_run = [f'{index}{self.job_names[index] if self.job_names else ""}' for index in list(_running)]
+                    print_completed = [f'{index}{self.job_names[index] if self.job_names else ""}' for index in list(self._completed)]
+                    uf.info(f'jobs running: {print_run if len(print_run) <= 15 else len(print_run)}', True)
+                    uf.info(f'jobs completed: {print_completed if len(print_completed) <= 15 else len(print_completed)}', True)
+                    time_last_flush = time.time()
                 _running = set()
                 bar.update(len(self._completed))
                 print("")
                 time.sleep(self.flushtime)
                 if self.timeout and time.perf_counter() - _timer > self.timeout:
                     break
-
 
             # Try to get results
             for i, job in enumerate(_jobs):
@@ -168,6 +172,7 @@ class mp:
                 uf.info('All jobs are done running', True)
             elif all([job.ready() for job in _jobs]):
                 uf.info('All jobs have been run but some failed', True)
+        self.jobs = _jobs
 
 ########### test code
 # mylist = [chr(x) for x in range(ord('a'), ord('k'))]
